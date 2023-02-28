@@ -99,6 +99,9 @@ pub fn get_config(args: &[&str]) -> Result<Config, String> {
     }
 
     // Forwards
+    if matches.free.len() == 0 {
+        return Err("no forward list found".to_string());
+    }
     let mut forwards: Vec<Forward> = Vec::with_capacity(matches.free.len());
     for s in matches.free {
         forwards.push(get_forward(&s)?);

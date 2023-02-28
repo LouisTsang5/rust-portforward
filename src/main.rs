@@ -19,7 +19,7 @@ fn main() -> Result<(), String> {
             print_usage(&args[0]);
             return Ok(());
         }
-        Err(e) => return Err(format!("Error: {}", e)),
+        Err(e) => return Err(format!("{}", e)),
     };
     print_config(&config);
 

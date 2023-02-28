@@ -1,4 +1,4 @@
-use std::{error::Error, net::IpAddr};
+use std::net::IpAddr;
 
 use dns_lookup::lookup_host;
 use getopts::Options;
@@ -35,35 +35,38 @@ pub fn print_usage(program: &str) {
     print!("{}", get_opts().usage(&brief));
 }
 
-fn get_forward(s: &str) -> Result<Forward, Box<dyn Error>> {
+fn get_forward(s: &str) -> Result<Forward, String> {
     let source_port = s.split(':').take(1).collect::<Vec<&str>>()[0];
     let mut targets: Vec<(IpAddr, usize)> = vec![];
     for s in s[source_port.len() + 1..].split(',') {
         let vs = s.split(':').collect::<Vec<&str>>();
         if vs.len() != 2 {
-            return Err(format!("invalid target: {}", s).into());
+            return Err(format!("invalid target: {}", s));
         }
 
         let host = match lookup_host(vs[0]) {
             Ok(hosts) => hosts,
-            Err(e) => return Err(format!("{}", e).into()),
+            Err(e) => return Err(format!("{}", e)),
         }[0];
 
         let port = match vs[1].parse::<usize>() {
             Ok(port) => port,
-            Err(_) => return Err(format!("{} is not a valid port", vs[1]).into()),
+            Err(_) => return Err(format!("{} is not a valid port", vs[1])),
         };
 
         targets.push((host, port));
     }
-    let source_port = source_port.parse::<usize>()?;
+    let source_port = match source_port.parse::<usize>() {
+        Ok(port) => port,
+        Err(_) => return Err(format!("{} is not a valid port", source_port)),
+    };
     return Ok(Forward {
         source_port,
         targets,
     });
 }
 
-pub fn get_config(args: &Vec<&str>) -> Result<Config, Box<dyn Error>> {
+pub fn get_config(args: &[&str]) -> Result<Config, String> {
     let mut buffer_size_kb: usize = 8;
     let mut n_thread: usize = 5;
 
@@ -71,26 +74,28 @@ pub fn get_config(args: &Vec<&str>) -> Result<Config, Box<dyn Error>> {
     let opts = get_opts();
     let matches = match opts.parse(args) {
         Ok(m) => m,
-        Err(_) => {
-            // print_usage(&program);
-            return Err("Help requested".into());
-        }
+        Err(_) => return Err("Help".to_string()),
     };
 
     // Help
     if matches.opt_present("h") {
-        // print_usage(&program);
-        return Err("Help requested".into());
+        return Err("Help".to_string());
     }
 
     // Buffer size
     if let Some(bs) = matches.opt_str("b") {
-        buffer_size_kb = bs.parse()?;
+        buffer_size_kb = match bs.parse() {
+            Ok(b) => b,
+            Err(_) => return Err(format!("{bs} is not a valid buffer size")),
+        }
     }
 
     // N thread
     if let Some(nt) = matches.opt_str("t") {
-        n_thread = nt.parse()?;
+        n_thread = match nt.parse() {
+            Ok(n) => n,
+            Err(_) => return Err(format!("{nt} is not a valid number of threads")),
+        }
     }
 
     // Forwards

@@ -100,8 +100,21 @@ pub fn get_config(args: &[&str]) -> Result<Config, String> {
     }
     let mut forwards: Vec<Forward> = Vec::with_capacity(matches.free.len());
     for s in matches.free {
-        forwards.push(get_forward(&s)?);
+        let forward = get_forward(&s)?;
+        if forwards
+            .iter()
+            .map(|f| f.s_port)
+            .collect::<Vec<u16>>()
+            .contains(&forward.s_port)
+        {
+            return Err(format!(
+                "Cannot declare the same port twice. Found {} twice.",
+                forward.s_port
+            ));
+        }
+        forwards.push(forward);
     }
+    forwards.sort_by(|f1, f2| f1.s_port.cmp(&f2.s_port));
 
     return Ok(Config {
         forwards,

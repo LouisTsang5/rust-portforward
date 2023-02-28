@@ -5,8 +5,8 @@ use getopts::Options;
 
 #[derive(Debug)]
 pub struct Forward {
-    pub source_port: usize,
-    pub targets: Vec<(IpAddr, usize)>,
+    pub source_port: u16,
+    pub targets: Vec<(IpAddr, u16)>,
 }
 
 #[derive(Debug)]
@@ -37,7 +37,7 @@ pub fn print_usage(program: &str) {
 
 fn get_forward(s: &str) -> Result<Forward, String> {
     let source_port = s.split(':').take(1).collect::<Vec<&str>>()[0];
-    let mut targets: Vec<(IpAddr, usize)> = vec![];
+    let mut targets: Vec<(IpAddr, u16)> = vec![];
     for s in s[source_port.len() + 1..].split(',') {
         let vs = s.split(':').collect::<Vec<&str>>();
         if vs.len() != 2 {
@@ -49,14 +49,14 @@ fn get_forward(s: &str) -> Result<Forward, String> {
             Err(e) => return Err(format!("{}", e)),
         }[0];
 
-        let port = match vs[1].parse::<usize>() {
+        let port = match vs[1].parse::<u16>() {
             Ok(port) => port,
             Err(_) => return Err(format!("{} is not a valid port", vs[1])),
         };
 
         targets.push((host, port));
     }
-    let source_port = match source_port.parse::<usize>() {
+    let source_port = match source_port.parse::<u16>() {
         Ok(port) => port,
         Err(_) => return Err(format!("{} is not a valid port", source_port)),
     };

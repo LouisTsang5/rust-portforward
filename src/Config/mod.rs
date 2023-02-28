@@ -5,8 +5,8 @@ use getopts::Options;
 
 #[derive(Debug)]
 pub struct Forward {
-    pub source_port: u16,
-    pub targets: Vec<(IpAddr, u16)>,
+    pub s_port: u16,
+    pub target: (IpAddr, u16),
 }
 
 #[derive(Debug)]
@@ -36,34 +36,30 @@ pub fn print_usage(program: &str) {
 }
 
 fn get_forward(s: &str) -> Result<Forward, String> {
-    let source_port = s.split(':').take(1).collect::<Vec<&str>>()[0];
-    let mut targets: Vec<(IpAddr, u16)> = vec![];
-    for s in s[source_port.len() + 1..].split(',') {
-        let vs = s.split(':').collect::<Vec<&str>>();
-        if vs.len() != 2 {
-            return Err(format!("invalid target: {}", s));
-        }
+    let s_port = s.split(':').take(1).collect::<Vec<&str>>()[0];
 
-        let host = match lookup_host(vs[0]) {
-            Ok(hosts) => hosts,
-            Err(e) => return Err(format!("{}", e)),
-        }[0];
-
-        let port = match vs[1].parse::<u16>() {
-            Ok(port) => port,
-            Err(_) => return Err(format!("{} is not a valid port", vs[1])),
-        };
-
-        targets.push((host, port));
+    let target = &s[s_port.len() + 1..];
+    let vs = target.split(':').collect::<Vec<&str>>();
+    if vs.len() != 2 {
+        return Err(format!("invalid target: {}", s));
     }
-    let source_port = match source_port.parse::<u16>() {
+
+    let host = match lookup_host(vs[0]) {
+        Ok(hosts) => hosts,
+        Err(e) => return Err(format!("{}", e)),
+    }[0];
+
+    let port = match vs[1].parse::<u16>() {
         Ok(port) => port,
-        Err(_) => return Err(format!("{} is not a valid port", source_port)),
+        Err(_) => return Err(format!("{} is not a valid port", vs[1])),
     };
-    return Ok(Forward {
-        source_port,
-        targets,
-    });
+
+    let target = (host, port);
+    let s_port = match s_port.parse::<u16>() {
+        Ok(port) => port,
+        Err(_) => return Err(format!("{} is not a valid port", s_port)),
+    };
+    return Ok(Forward { s_port, target });
 }
 
 pub fn get_config(args: &[&str]) -> Result<Config, String> {

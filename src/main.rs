@@ -4,7 +4,7 @@ use rust_portforward::{
 };
 use std::{
     env,
-    io::{BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, ErrorKind, Write},
     net::{IpAddr, SocketAddr, TcpListener, TcpStream},
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
@@ -28,21 +28,18 @@ fn main() -> Result<(), String> {
     let threadpool = Arc::new(Mutex::new(ThreadPool::new(config.n_thread)));
 
     // Create listener threads
-    let mut handlers: Vec<JoinHandle<()>> = Vec::with_capacity(config.forwards.len());
+    let mut handles: Vec<JoinHandle<Result<(), String>>> =
+        Vec::with_capacity(config.forwards.len());
     for forward in config.forwards {
-        let listener = match TcpListener::bind(format!("127.0.0.1:{}", forward.source_port)) {
-            Ok(l) => l,
-            Err(_) => return Err(format!("Failed to bind to port {}", forward.source_port)),
-        };
-        let targets = Arc::new(forward.targets);
-        let buff_size = config.buffer_size_kb;
         let threadpool = Arc::clone(&threadpool);
-        handlers.push(thread::spawn(move || {
-            accept_conn(listener, targets, buff_size, threadpool)
+        let src_port = forward.s_port;
+        let buff_size = config.buffer_size_kb;
+        handles.push(thread::spawn(move || {
+            accept_conn(src_port, forward.target, buff_size, threadpool)
         }));
     }
-    for handle in handlers {
-        handle.join().unwrap();
+    for handle in handles {
+        handle.join().unwrap().unwrap();
     }
 
     return Ok(());
@@ -54,105 +51,101 @@ fn print_config(config: &Config) {
         config.buffer_size_kb, config.n_thread
     );
     for f in &config.forwards {
-        for (ip, port) in &f.targets {
-            println!("\t{} -> {}:{}", f.source_port, ip, port);
-        }
+        let (ip, port) = f.target;
+        println!("\t{} -> {}:{}", f.s_port, ip, port);
     }
 }
 
 fn accept_conn(
-    listener: TcpListener,
-    targets: Arc<Vec<(IpAddr, u16)>>,
+    src_port: u16,
+    target: (IpAddr, u16),
     buff_size: usize,
     threadpool: Arc<Mutex<ThreadPool>>,
-) {
-    for read_stream in listener.incoming() {
-        let read_stream = read_stream.unwrap();
-        let targets = Arc::clone(&targets);
+) -> Result<(), String> {
+    let listener = match TcpListener::bind(format!("127.0.0.1:{}", src_port)) {
+        Ok(l) => l,
+        Err(_) => return Err(format!("Failed to bind to port {}", src_port)),
+    };
+
+    for src_stream in listener.incoming() {
+        let src_stream = match src_stream {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
         threadpool.lock().unwrap().execute(move |id| {
             println!(
-                "Connection accepted from {}. Dispatching handler {id}...",
-                read_stream.peer_addr().unwrap()
+                "Connection accepted from {}. Dispatching handle {id}...",
+                src_stream.peer_addr().unwrap()
             );
-            handle_forward(read_stream, targets, buff_size).unwrap();
+            handle_conn(src_stream, &target, buff_size).unwrap();
         });
     }
+    return Ok(());
 }
 
-fn is_empty<T>(lists: &Vec<Option<T>>) -> bool {
-    return lists.iter().all(|item| {
-        return match item {
-            Some(_) => false,
-            None => true,
-        };
-    });
-}
-
-fn handle_forward(
-    read_stream: TcpStream,
-    targets: Arc<Vec<(IpAddr, u16)>>,
+fn handle_conn(
+    src_stream: TcpStream,
+    target: &(IpAddr, u16),
     buff_size: usize,
 ) -> Result<(), String> {
-    let mut buff_reader = BufReader::with_capacity(buff_size * 1024, &read_stream);
-    let mut write_streams: Vec<Option<(TcpStream, SocketAddr)>> =
-        get_write_streams(targets.as_ref())?
-            .into_iter()
-            .map(|s| {
-                let addr = s.peer_addr().unwrap();
-                return Some((s, addr));
-            })
-            .collect();
-    let source_addr = read_stream.peer_addr().unwrap();
+    let tgt_stream = match TcpStream::connect(SocketAddr::new(target.0, target.1)) {
+        Ok(s) => s,
+        Err(_) => return Err(format!("Failed to connect to {}:{}", target.0, target.1)),
+    };
+    let source_addr = src_stream.peer_addr().unwrap();
 
     println!("Opening handle for {}...", source_addr);
 
-    loop {
-        if is_empty(&write_streams) {
-            println!("No targets can be written to. Exiting handle...");
-            break;
-        }
+    let s2t = {
+        let src_stream = src_stream.try_clone().unwrap();
+        let tgt_stream = tgt_stream.try_clone().unwrap();
+        thread::spawn(move || forward(src_stream, tgt_stream, buff_size))
+    };
 
-        let (buff, buff_len) = match buff_reader.fill_buf() {
-            Ok(b) if b.len() == 0 => break,
-            Ok(b) => (b, b.len()),
-            Err(_) => {
-                println!("Cannot read from {}. Exiting handle...", source_addr);
-                break;
-            }
-        };
-        println!("Read {} bytes from {}", buff_len, source_addr);
+    let t2s = thread::spawn(move || forward(tgt_stream, src_stream, buff_size));
 
-        for ws_sock in write_streams.iter_mut() {
-            if let Some((ws, target_addr)) = ws_sock {
-                if let Err(_) = ws.write_all(buff) {
-                    println!("Failed to write to {}.", target_addr);
-                    ws_sock.take();
-                } else {
-                    println!("Written {} bytes to {}.", buff_len, target_addr);
-                }
-            }
-        }
-
-        buff_reader.consume(buff_len);
-    }
-
+    s2t.join().unwrap();
+    t2s.join().unwrap();
     println!("Closing handle for {}...", source_addr);
 
     return Ok(());
 }
 
-fn get_write_streams(targets: &Vec<(IpAddr, u16)>) -> Result<Vec<TcpStream>, String> {
-    let mut write_streams: Vec<TcpStream> = vec![];
-    for (ip, port) in targets {
-        if let Ok(ws) = TcpStream::connect(SocketAddr::new(*ip, *port)) {
-            write_streams.push(ws);
-        } else {
-            eprintln!("Failed to connect to {}:{}", ip, port);
+fn forward(src: TcpStream, mut tgt: TcpStream, buff_size: usize) {
+    let src_addr = src.peer_addr().unwrap();
+    let tgt_addr = tgt.peer_addr().unwrap();
+    let mut buff_reader = BufReader::with_capacity(buff_size * 1024, &src);
+    loop {
+        let (buff, buff_len) = match buff_reader.fill_buf() {
+            Ok(b) if b.len() == 0 => {
+                println!("No more content can be read from {}", src_addr);
+                break;
+            }
+            Ok(b) => (b, b.len()),
+            Err(_) => {
+                println!("Failed to read from {}.", src_addr);
+                break;
+            }
         };
+        println!("Read {} bytes from {}", buff_len, src_addr);
+
+        if let Err(_) = tgt.write_all(buff) {
+            println!("Failed to write to {}.", tgt_addr);
+            break;
+        } else {
+            println!("Written {} bytes to {}.", buff_len, tgt_addr);
+        }
+
+        buff_reader.consume(buff_len);
     }
-    if write_streams.len() > 0 {
-        return Ok(write_streams);
-    } else {
-        return Err("Unable to connect".to_string());
-    }
+    shudown(&src).unwrap();
+    shudown(&tgt).unwrap();
+}
+
+fn shudown(s: &TcpStream) -> Result<(), io::Error> {
+    return match s.shutdown(std::net::Shutdown::Both) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotConnected => Ok(()),
+        Err(e) => Err(e),
+    };
 }

@@ -12,7 +12,7 @@ pub fn accept_conn(
     buff_size: usize,
     threadpool: Arc<Mutex<ThreadPool>>,
 ) -> Result<(), String> {
-    let listener = match TcpListener::bind(format!("127.0.0.1:{}", src_port)) {
+    let listener = match TcpListener::bind(format!("0.0.0.0:{}", src_port)) {
         Ok(l) => l,
         Err(_) => return Err(format!("Failed to bind to port {}", src_port)),
     };

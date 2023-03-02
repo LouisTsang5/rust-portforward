@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::{fs, io::ErrorKind, net::IpAddr};
 
 use dns_lookup::lookup_host;
 use getopts::Options;
@@ -25,6 +25,12 @@ fn get_opts() -> Options {
         "buff",
         "The buffer size of each handler thread",
         "BUFF_SIZE",
+    );
+    opts.optopt(
+        "f",
+        "conf",
+        "A list of information for port forwarding",
+        "CONFIG_FILE",
     );
     opts.optopt("t", "nthread", "The number of handler threads", "N_THREAD");
     return opts;
@@ -95,11 +101,8 @@ pub fn get_config(args: &[&str]) -> Result<Config, String> {
     }
 
     // Forwards
-    if matches.free.len() == 0 {
-        return Err("no forward list found".to_string());
-    }
     let mut forwards: Vec<Forward> = Vec::with_capacity(matches.free.len());
-    for s in matches.free {
+    for s in &matches.free {
         let forward = get_forward(&s)?;
         if forwards
             .iter()
@@ -114,6 +117,22 @@ pub fn get_config(args: &[&str]) -> Result<Config, String> {
         }
         forwards.push(forward);
     }
+
+    // Read config file put into the forwards vector if it is not present
+    if let Some(file_path) = matches.opt_str("f") {
+        for file_f in read_config_file(&file_path)? {
+            if forwards.len() == 0 || forwards.iter().all(|f| f.s_port != file_f.s_port) {
+                forwards.push(file_f);
+            }
+        }
+    }
+
+    // If no forward list return error
+    if forwards.len() == 0 {
+        return Err("no forward list found".to_string());
+    }
+
+    // Sort the array in ascending order of source port
     forwards.sort_by(|f1, f2| f1.s_port.cmp(&f2.s_port));
 
     return Ok(Config {
@@ -121,4 +140,22 @@ pub fn get_config(args: &[&str]) -> Result<Config, String> {
         buffer_size_kb,
         n_thread,
     });
+}
+
+fn read_config_file(file_path: &str) -> Result<Vec<Forward>, String> {
+    let config = match fs::read_to_string(file_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            return Err(format!("{file_path} does not exists"));
+        }
+        Err(e) => {
+            return Err(e.to_string());
+        }
+    };
+    let lines: Vec<&str> = config.lines().collect();
+    let mut forwards: Vec<Forward> = Vec::with_capacity(lines.len());
+    for line in lines {
+        forwards.push(get_forward(line)?);
+    }
+    return Ok(forwards);
 }

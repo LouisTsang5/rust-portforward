@@ -1,4 +1,4 @@
-use std::{fs, io::ErrorKind, net::IpAddr};
+use std::{fs, io::ErrorKind, net::SocketAddr};
 
 use dns_lookup::lookup_host;
 use getopts::Options;
@@ -6,7 +6,7 @@ use getopts::Options;
 #[derive(Debug)]
 pub struct Forward {
     pub s_port: u16,
-    pub target: (IpAddr, u16),
+    pub target: SocketAddr,
 }
 
 #[derive(Debug)]
@@ -60,7 +60,7 @@ fn get_forward(s: &str) -> Result<Forward, String> {
         Err(_) => return Err(format!("{} is not a valid port", vs[1])),
     };
 
-    let target = (host, port);
+    let target = SocketAddr::new(host, port);
     let s_port = match s_port.parse::<u16>() {
         Ok(port) => port,
         Err(_) => return Err(format!("{} is not a valid port", s_port)),
@@ -68,7 +68,7 @@ fn get_forward(s: &str) -> Result<Forward, String> {
     return Ok(Forward { s_port, target });
 }
 
-pub fn get_config(args: &[&str]) -> Result<Config, String> {
+pub fn get_config(args: &[String]) -> Result<Config, String> {
     let mut buffer_size_kb: usize = 8;
     let mut n_thread: usize = 5;
 

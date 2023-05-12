@@ -1,53 +1,38 @@
 use rust_portforward::{
     Config::{get_config, print_usage, Config},
     ConnHandle::accept_conn,
-    ThreadPool::ThreadPool,
 };
-use std::{
-    env,
-    sync::{Arc, Mutex},
-    thread::{self, JoinHandle},
-};
+use std::env;
 
-fn main() -> Result<(), String> {
+#[tokio::main]
+async fn main() {
     //Read Args
     let args = env::args().collect::<Vec<_>>();
-    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     let config = match get_config(&args[1..]) {
         Ok(c) => c,
-        Err(e) if e == "Help" => {
-            print_usage(&args[0]);
-            return Ok(());
-        }
-        Err(e) => return Err(format!("{}", e)),
+        Err(e) if e == "Help" => return print_usage(&args[0]),
+        Err(e) => return eprintln!("{}", e),
     };
     print_config(&config);
 
-    // Create thread pool
-    let threadpool = Arc::new(Mutex::new(ThreadPool::new(config.n_thread)));
-
-    // Create handle threads
-    let mut handles: Vec<JoinHandle<Result<(), String>>> =
+    // Accept connection and dispatch tasks
+    let mut join_handles: Vec<tokio::task::JoinHandle<()>> =
         Vec::with_capacity(config.forwards.len());
     for forward in config.forwards {
-        let threadpool = Arc::clone(&threadpool);
-        handles.push(thread::spawn(move || {
-            accept_conn(
-                forward.s_port,
-                forward.target,
-                config.buffer_size_kb,
-                threadpool,
-            )
+        join_handles.push(tokio::spawn(async move {
+            if let Err(e) = accept_conn(forward.s_port, forward.target, config.buffer_size_kb).await
+            {
+                eprintln!("{}", e);
+            }
         }));
     }
-    for handle in handles {
-        match handle.join().unwrap() {
-            Err(e) => eprintln!("Error: {e}"),
-            _ => (),
+
+    let join_results = futures::future::join_all(join_handles).await;
+    for result in join_results {
+        if let Err(e) = result {
+            eprintln!("{}", e);
         }
     }
-
-    return Ok(());
 }
 
 fn print_config(config: &Config) {
@@ -56,7 +41,6 @@ fn print_config(config: &Config) {
         config.buffer_size_kb, config.n_thread
     );
     for f in &config.forwards {
-        let (ip, port) = f.target;
-        println!("\t{} -> {}:{}", f.s_port, ip, port);
+        println!("\t{} -> {}", f.s_port, f.target);
     }
 }

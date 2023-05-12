@@ -7,4 +7,6 @@ edition = "2021"
 
 [dependencies]
 dns-lookup = "1.0.8"
+futures = "0.3.28"
 getopts = "0.2.21"
+tokio = { version = "1.28.1", features = ["full"] }

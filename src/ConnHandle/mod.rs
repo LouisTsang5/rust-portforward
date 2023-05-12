@@ -1,101 +1,177 @@
-use super::ThreadPool::ThreadPool;
 use std::{
-    io::{self, BufRead, BufReader, ErrorKind, Write},
-    net::{IpAddr, SocketAddr, TcpListener, TcpStream},
-    sync::{Arc, Mutex},
-    thread::{self},
+    fmt::Display,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
 };
 
-pub fn accept_conn(
-    src_port: u16,
-    target: (IpAddr, u16),
-    buff_size: usize,
-    threadpool: Arc<Mutex<ThreadPool>>,
-) -> Result<(), String> {
-    let listener = match TcpListener::bind(format!("0.0.0.0:{}", src_port)) {
-        Ok(l) => l,
-        Err(_) => return Err(format!("Failed to bind to port {}", src_port)),
-    };
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+        TcpListener, TcpStream,
+    },
+};
 
-    for src_stream in listener.incoming() {
-        let src_stream = match src_stream {
-            Ok(s) => s,
-            Err(_) => continue,
+pub async fn accept_conn(
+    src_port: u16,
+    target: SocketAddr,
+    buff_size: usize,
+) -> Result<(), std::io::Error> {
+    let listener = TcpListener::bind(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+        src_port,
+    ))
+    .await?;
+
+    loop {
+        // Listen on incoming connections
+        let (stream, peer) = match listener.accept().await {
+            Ok((s, p)) => (s, p),
+            Err(e) => {
+                eprintln!("{e}");
+                continue;
+            }
         };
-        threadpool.lock().unwrap().execute(move |id| {
-            println!(
-                "Connection accepted from {}. Dispatching handle {id}...",
-                src_stream.peer_addr().unwrap()
-            );
-            handle_conn(src_stream, &target, buff_size).unwrap();
+
+        // Handle connection
+        tokio::spawn(async move {
+            if let Err(e) = handle_conn(stream, peer, target, buff_size).await {
+                eprintln!("{}", e);
+            }
         });
     }
-    return Ok(());
 }
 
-fn handle_conn(
+async fn handle_conn(
     src_stream: TcpStream,
-    target: &(IpAddr, u16),
+    src_sockaddr: SocketAddr,
+    tgt_sockaddr: SocketAddr,
     buff_size: usize,
-) -> Result<(), String> {
-    let tgt_stream = match TcpStream::connect(SocketAddr::new(target.0, target.1)) {
-        Ok(s) => s,
-        Err(_) => return Err(format!("Failed to connect to {}:{}", target.0, target.1)),
-    };
-    let source_addr = src_stream.peer_addr().unwrap();
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tgt_stream = TcpStream::connect(tgt_sockaddr).await?;
 
-    println!("Opening handle for {}...", source_addr);
+    println!("Opening handle for {}...", src_sockaddr);
+    let (src_rstream, src_wstream) = src_stream.into_split();
+    let (tgt_rstream, tgt_wstream) = tgt_stream.into_split();
 
-    let s2t = {
-        let src_stream = src_stream.try_clone().unwrap();
-        let tgt_stream = tgt_stream.try_clone().unwrap();
-        thread::spawn(move || forward(src_stream, tgt_stream, buff_size))
-    };
+    let s2t = tokio::spawn(async move {
+        handle_forward(
+            src_rstream,
+            &src_sockaddr,
+            tgt_wstream,
+            &tgt_sockaddr,
+            buff_size,
+        )
+        .await
+    });
 
-    let t2s = thread::spawn(move || forward(tgt_stream, src_stream, buff_size));
+    let t2s = tokio::spawn(async move {
+        handle_forward(
+            tgt_rstream,
+            &tgt_sockaddr,
+            src_wstream,
+            &src_sockaddr,
+            buff_size,
+        )
+        .await
+    });
 
-    s2t.join().unwrap();
-    t2s.join().unwrap();
-    println!("Closing handle for {}...", source_addr);
-
-    return Ok(());
-}
-
-fn forward(src: TcpStream, mut tgt: TcpStream, buff_size: usize) {
-    let src_addr = src.peer_addr().unwrap();
-    let tgt_addr = tgt.peer_addr().unwrap();
-    let mut buff_reader = BufReader::with_capacity(buff_size * 1024, &src);
-    loop {
-        let (buff, buff_len) = match buff_reader.fill_buf() {
-            Ok(b) if b.len() == 0 => {
-                println!("No more content can be read from {}", src_addr);
-                break;
+    let (s2t_r, t2s_r) = tokio::join!(s2t, t2s);
+    match s2t_r {
+        Ok(task_result) => {
+            if let Err(e) = task_result {
+                eprintln!("{}", e);
             }
-            Ok(b) => (b, b.len()),
-            Err(_) => {
-                println!("Failed to read from {}.", src_addr);
-                break;
-            }
-        };
-        println!("Read {} bytes from {}", buff_len, src_addr);
-
-        if let Err(_) = tgt.write_all(buff) {
-            println!("Failed to write to {}.", tgt_addr);
-            break;
-        } else {
-            println!("Written {} bytes to {}.", buff_len, tgt_addr);
         }
+        Err(join_err) => eprintln!("{}", join_err),
+    };
+    match t2s_r {
+        Ok(task_result) => {
+            if let Err(e) = task_result {
+                eprintln!("{}", e);
+            }
+        }
+        Err(join_err) => eprintln!("{}", join_err),
+    };
 
-        buff_reader.consume(buff_len);
-    }
-    shudown(&src).unwrap();
-    shudown(&tgt).unwrap();
+    println!("Closing handle for {}...", src_sockaddr);
+    Ok(())
 }
 
-fn shudown(s: &TcpStream) -> Result<(), io::Error> {
-    return match s.shutdown(std::net::Shutdown::Both) {
+struct HandleForwardError {
+    loop_error: Option<std::io::Error>,
+    shutdown_error: Option<std::io::Error>,
+}
+
+impl Display for HandleForwardError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut error_strings: Vec<String> = Vec::with_capacity(2);
+        if let Some(e) = &self.loop_error {
+            error_strings.push(format!("{}", e));
+        }
+        if let Some(e) = &self.shutdown_error {
+            error_strings.push(format!("{}", e));
+        }
+        let error_string = error_strings.join(", ");
+        write!(f, "{}", error_string)
+    }
+}
+
+async fn handle_forward(
+    mut src_rstream: OwnedReadHalf,
+    src_sockaddr: &SocketAddr,
+    mut tgt_wstream: OwnedWriteHalf,
+    tgt_sockaddr: &SocketAddr,
+    buff_size: usize,
+) -> Result<(), HandleForwardError> {
+    let loop_res = forward_loop(
+        &mut src_rstream,
+        src_sockaddr,
+        &mut tgt_wstream,
+        tgt_sockaddr,
+        buff_size,
+    )
+    .await;
+
+    let shutdown_res = match tgt_wstream.shutdown().await {
         Ok(_) => Ok(()),
-        Err(e) if e.kind() == ErrorKind::NotConnected => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotConnected => Ok(()),
         Err(e) => Err(e),
     };
+
+    // Error gathering
+    let mut error = HandleForwardError {
+        loop_error: None,
+        shutdown_error: None,
+    };
+    if let Err(e) = loop_res {
+        error.loop_error = Some(e);
+    }
+    if let Err(e) = shutdown_res {
+        error.shutdown_error = Some(e);
+    }
+
+    if error.loop_error.is_none() && error.shutdown_error.is_none() {
+        return Ok(());
+    }
+    Err(error)
+}
+
+async fn forward_loop(
+    src_rstream: &mut OwnedReadHalf,
+    src_sockaddr: &SocketAddr,
+    tgt_wstream: &mut OwnedWriteHalf,
+    tgt_sockaddr: &SocketAddr,
+    buff_size: usize,
+) -> Result<(), std::io::Error> {
+    let mut buff: Vec<u8> = vec![0; buff_size * 1024];
+    loop {
+        let bytes_read = src_rstream.read(&mut buff).await?;
+        if bytes_read == 0 {
+            println!("No more content can be read from {}", src_sockaddr);
+            break;
+        };
+        tgt_wstream.write(&buff[..bytes_read]).await?;
+        println!("Wrote\t{}\tbytes to {}", bytes_read, tgt_sockaddr);
+    }
+    Ok(())
 }

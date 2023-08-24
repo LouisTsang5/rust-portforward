@@ -163,7 +163,7 @@ async fn forward_loop(
     tgt_sockaddr: &SocketAddr,
     buff_size: usize,
 ) -> Result<(), std::io::Error> {
-    let mut buff: Vec<u8> = vec![0; buff_size * 1024];
+    let mut buff = vec![0; buff_size * 1024];
     loop {
         let bytes_read = src_rstream.read(&mut buff).await?;
         if bytes_read == 0 {

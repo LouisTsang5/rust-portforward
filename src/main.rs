@@ -1,11 +1,12 @@
 use rust_portforward::{
     Config::{get_config, print_usage, Config},
     ConnHandle::accept_conn,
+    Meter,
 };
 use std::env;
 
 fn main() {
-    //Read Args
+    // Read Args
     let args = env::args().collect::<Vec<_>>();
     let config = match get_config(&args[1..]) {
         Ok(c) => c,
@@ -13,6 +14,9 @@ fn main() {
         Err(e) => return eprintln!("{}", e),
     };
     print_config(&config);
+
+    // Create a meter
+    let (meter, meter_msg_sender) = Meter::Meter::new();
 
     // Configure async runtime
     tokio::runtime::Builder::new_multi_thread()
@@ -25,9 +29,15 @@ fn main() {
             let mut join_handles: Vec<tokio::task::JoinHandle<()>> =
                 Vec::with_capacity(config.forwards.len());
             for forward in config.forwards {
+                let meter_msg_sender = meter_msg_sender.clone();
                 join_handles.push(tokio::spawn(async move {
-                    if let Err(e) =
-                        accept_conn(forward.s_port, forward.target, config.buffer_size_kb).await
+                    if let Err(e) = accept_conn(
+                        forward.s_port,
+                        forward.target,
+                        config.buffer_size_kb,
+                        meter_msg_sender,
+                    )
+                    .await
                     {
                         eprintln!("{}", e);
                     }
@@ -42,6 +52,8 @@ fn main() {
                 }
             }
         });
+
+    meter.shutdown().unwrap();
 }
 
 fn print_config(config: &Config) {

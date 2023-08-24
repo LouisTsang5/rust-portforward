@@ -1,6 +1,7 @@
 use std::{
     fmt::Display,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::{Arc, Mutex},
 };
 
 use tokio::{
@@ -11,10 +12,13 @@ use tokio::{
     },
 };
 
+use crate::Meter::MeterMessageSender;
+
 pub async fn accept_conn(
     src_port: u16,
     target: SocketAddr,
     buff_size: usize,
+    meter_msg_sender: MeterMessageSender,
 ) -> Result<(), std::io::Error> {
     let listener = TcpListener::bind(SocketAddr::new(
         IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
@@ -33,8 +37,9 @@ pub async fn accept_conn(
         };
 
         // Handle connection
+        let meter_msg_sender = meter_msg_sender.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(stream, peer, target, buff_size).await {
+            if let Err(e) = handle_conn(stream, peer, target, buff_size, meter_msg_sender).await {
                 eprintln!("{}", e);
             }
         });
@@ -46,6 +51,7 @@ async fn handle_conn(
     src_sockaddr: SocketAddr,
     tgt_sockaddr: SocketAddr,
     buff_size: usize,
+    meter_msg_sender: MeterMessageSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tgt_stream = TcpStream::connect(tgt_sockaddr).await?;
 
@@ -53,27 +59,33 @@ async fn handle_conn(
     let (src_rstream, src_wstream) = src_stream.into_split();
     let (tgt_rstream, tgt_wstream) = tgt_stream.into_split();
 
-    let s2t = tokio::spawn(async move {
-        handle_forward(
-            src_rstream,
-            &src_sockaddr,
-            tgt_wstream,
-            &tgt_sockaddr,
-            buff_size,
-        )
-        .await
-    });
+    let s2t = {
+        let meter_msg_sender = Arc::new(Mutex::new(meter_msg_sender.clone()));
+        tokio::spawn(async move {
+            handle_forward(src_rstream, tgt_wstream, buff_size, |n_bytes| {
+                meter_msg_sender
+                    .lock()
+                    .unwrap()
+                    .send(src_sockaddr, crate::Meter::Direction::From, n_bytes)
+                    .unwrap();
+            })
+            .await
+        })
+    };
 
-    let t2s = tokio::spawn(async move {
-        handle_forward(
-            tgt_rstream,
-            &tgt_sockaddr,
-            src_wstream,
-            &src_sockaddr,
-            buff_size,
-        )
-        .await
-    });
+    let t2s = {
+        let meter_msg_sender = Arc::new(Mutex::new(meter_msg_sender));
+        tokio::spawn(async move {
+            handle_forward(tgt_rstream, src_wstream, buff_size, |n_bytes| {
+                meter_msg_sender
+                    .lock()
+                    .unwrap()
+                    .send(src_sockaddr, crate::Meter::Direction::To, n_bytes)
+                    .unwrap()
+            })
+            .await
+        })
+    };
 
     let (s2t_r, t2s_r) = tokio::join!(s2t, t2s);
     match s2t_r {
@@ -116,19 +128,17 @@ impl Display for HandleForwardError {
     }
 }
 
-async fn handle_forward(
+async fn handle_forward<F: Fn(usize)>(
     mut src_rstream: OwnedReadHalf,
-    src_sockaddr: &SocketAddr,
     mut tgt_wstream: OwnedWriteHalf,
-    tgt_sockaddr: &SocketAddr,
     buff_size: usize,
+    meter_msg_send_fn: F,
 ) -> Result<(), HandleForwardError> {
     let loop_res = forward_loop(
         &mut src_rstream,
-        src_sockaddr,
         &mut tgt_wstream,
-        tgt_sockaddr,
         buff_size,
+        meter_msg_send_fn,
     )
     .await;
 
@@ -156,22 +166,21 @@ async fn handle_forward(
     Err(error)
 }
 
-async fn forward_loop(
+async fn forward_loop<F: Fn(usize)>(
     src_rstream: &mut OwnedReadHalf,
-    src_sockaddr: &SocketAddr,
     tgt_wstream: &mut OwnedWriteHalf,
-    tgt_sockaddr: &SocketAddr,
     buff_size: usize,
+    meter_msg_send_fn: F,
 ) -> Result<(), std::io::Error> {
     let mut buff = vec![0; buff_size * 1024];
+    meter_msg_send_fn(0); // Send 0 to initialize the meter
     loop {
         let bytes_read = src_rstream.read(&mut buff).await?;
         if bytes_read == 0 {
-            println!("No more content can be read from {}", src_sockaddr);
             break;
         };
         tgt_wstream.write(&buff[..bytes_read]).await?;
-        println!("Wrote\t{}\tbytes to {}", bytes_read, tgt_sockaddr);
+        meter_msg_send_fn(bytes_read);
     }
     Ok(())
 }

@@ -32,15 +32,20 @@ fn spawn_meter_thread(
     shutdown_receiver: Receiver<()>,
 ) -> JoinHandle<()> {
     let t_handle = thread::spawn(move || loop {
-        let mut map: HashMap<(SocketAddr, Direction), Vec<(Instant, usize)>> = HashMap::new();
-
+        let mut last_run_instant = Instant::now();
         loop {
             // Sleep for a duration
             thread::sleep(Duration::from_millis(SLEEP_MS));
 
-            // Read the channel until it is clear
+            // Read the channel and summarize the total number of bytes
+            let mut map: HashMap<SocketAddr, (usize, usize)> = HashMap::new();
             loop {
-                let msg = match message_receiver.try_recv() {
+                let Message {
+                    src_sockaddr,
+                    direction,
+                    n_bytes,
+                    instant: _,
+                } = match message_receiver.try_recv() {
                     Ok(m) => m,
                     Err(e) => match e {
                         TryRecvError::Empty => break,
@@ -50,53 +55,36 @@ fn spawn_meter_thread(
                     },
                 };
 
-                // Push message to map
-                let key = (msg.src_sockaddr, msg.direction);
-                let val = (msg.instant, msg.n_bytes);
-                if let Some(v) = map.get_mut(&key) {
-                    v.push(val);
+                // Add to total
+                if let Some((from_t_n_bytes, to_t_n_bytes)) = map.get_mut(&src_sockaddr) {
+                    match direction {
+                        Direction::From => *from_t_n_bytes += n_bytes,
+                        Direction::To => *to_t_n_bytes += n_bytes,
+                    };
                 } else {
-                    map.insert(key, vec![val]);
+                    match direction {
+                        Direction::From => map.insert(src_sockaddr, (n_bytes, 0)),
+                        Direction::To => map.insert(src_sockaddr, (0, n_bytes)),
+                    };
                 }
             }
 
-            // Construct the rates
-            for ((sockaddr, dir), v) in map.iter_mut() {
-                // Skip the vector if number elements are less than 2
-                if v.len() <= 1 {
-                    continue;
-                }
+            // Calculate current instant
+            let now = Instant::now();
 
-                // Reduce the vec to get min instant, max instant, and total number of bytes
-                let rate = v.iter().fold(None, |acc, (instant, n_bytes)| match acc {
-                    None => Some((instant, instant, *n_bytes)),
-                    Some((o_min_instant, o_max_instant, t_n_bytes)) => {
-                        let n_min_instant = match o_min_instant > instant {
-                            true => instant,
-                            false => o_min_instant,
-                        };
-                        let n_max_instant = match o_max_instant < instant {
-                            true => instant,
-                            false => o_max_instant,
-                        };
-                        let t_n_bytes = t_n_bytes + n_bytes;
-                        Some((n_min_instant, n_max_instant, t_n_bytes))
-                    }
-                });
-
-                // Print the vector
-                if let Some((min_instant, max_instant, t_n_bytes)) = rate {
-                    let dur_ms = max_instant.duration_since(*min_instant).as_micros();
-                    if dur_ms <= 0 {
-                        println!("{:?}", rate);
-                    }
-                    let kbytes_per_sec = t_n_bytes as f64 / (dur_ms as f64 / 1000f64);
-                    println!("{:?} {}: {:.2} KB/s", dir, sockaddr, kbytes_per_sec);
-                }
-
-                // Drain the vector and leave only 1 element as the start of the next calculation
-                v.drain(..v.len() - 1);
+            // Print the vector
+            for (sockaddr, (from_t_n_bytes, to_t_n_bytes)) in map.iter() {
+                let dur_microsec = now.duration_since(last_run_instant).as_micros();
+                let kbytes_per_sec_from = *from_t_n_bytes as f64 / (dur_microsec as f64 / 1000f64); // B/ms = KB/s
+                let kbytes_per_sec_to = *to_t_n_bytes as f64 / (dur_microsec as f64 / 1000f64); // B/ms = KB/s
+                println!(
+                    "[{}] ul: {:.2} KB/s, dl: {:.2} KB/s",
+                    sockaddr, kbytes_per_sec_from, kbytes_per_sec_to
+                );
             }
+
+            // Update last run instant
+            last_run_instant = now;
 
             // Check if the shutdown command has been sent
             match shutdown_receiver.try_recv() {

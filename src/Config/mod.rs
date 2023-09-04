@@ -3,6 +3,9 @@ use std::{fs, io::ErrorKind, net::SocketAddr};
 use dns_lookup::lookup_host;
 use getopts::Options;
 
+const DEFAULT_BUFF_SIZE_KB: usize = 4;
+const DEFAULT_N_THREADS: usize = 4;
+
 #[derive(Debug)]
 pub struct Forward {
     pub s_port: u16,
@@ -69,8 +72,8 @@ fn get_forward(s: &str) -> Result<Forward, String> {
 }
 
 pub fn get_config(args: &[String]) -> Result<Config, String> {
-    let mut buffer_size_kb: usize = 8;
-    let mut n_thread: usize = 5;
+    let mut buffer_size_kb: usize = DEFAULT_BUFF_SIZE_KB;
+    let mut n_thread: usize = DEFAULT_N_THREADS;
 
     // Read options
     let opts = get_opts();

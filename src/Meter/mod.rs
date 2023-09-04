@@ -31,7 +31,7 @@ fn spawn_meter_thread(
     message_receiver: Receiver<Message>,
     shutdown_receiver: Receiver<()>,
 ) -> JoinHandle<()> {
-    let t_handle = thread::spawn(move || loop {
+    let t_handle = thread::spawn(move || {
         let mut last_run_instant = Instant::now();
         loop {
             // Sleep for a duration

@@ -1,7 +1,6 @@
 use std::{
     fmt::Display,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{Arc, Mutex},
 };
 
 use tokio::{
@@ -60,12 +59,10 @@ async fn handle_conn(
     let (tgt_rstream, tgt_wstream) = tgt_stream.into_split();
 
     let s2t = {
-        let meter_msg_sender = Arc::new(Mutex::new(meter_msg_sender.clone()));
+        let meter_msg_sender = meter_msg_sender.clone();
         tokio::spawn(async move {
-            handle_forward(src_rstream, tgt_wstream, buff_size, |n_bytes| {
+            handle_forward(src_rstream, tgt_wstream, buff_size, move |n_bytes| {
                 meter_msg_sender
-                    .lock()
-                    .unwrap()
                     .send(src_sockaddr, crate::Meter::Direction::From, n_bytes)
                     .unwrap();
             })
@@ -74,12 +71,10 @@ async fn handle_conn(
     };
 
     let t2s = {
-        let meter_msg_sender = Arc::new(Mutex::new(meter_msg_sender));
+        let meter_msg_sender = meter_msg_sender;
         tokio::spawn(async move {
-            handle_forward(tgt_rstream, src_wstream, buff_size, |n_bytes| {
+            handle_forward(tgt_rstream, src_wstream, buff_size, move |n_bytes| {
                 meter_msg_sender
-                    .lock()
-                    .unwrap()
                     .send(src_sockaddr, crate::Meter::Direction::To, n_bytes)
                     .unwrap()
             })

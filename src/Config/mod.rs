@@ -26,7 +26,7 @@ fn get_opts() -> Options {
     opts.optopt(
         "b",
         "buff",
-        "The buffer size of each handler thread",
+        "The buffer size of each handler thread in KB",
         "BUFF_SIZE",
     );
     opts.optopt(

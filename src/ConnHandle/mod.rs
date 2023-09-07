@@ -3,6 +3,7 @@ use std::{
     fmt::Display,
     hash::Hash,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::OnceLock,
 };
 
 use futures::io;
@@ -13,19 +14,31 @@ use tokio::{
         TcpListener, TcpStream,
     },
     select,
-    sync::mpsc::Receiver,
+    sync::{mpsc::Receiver, Mutex},
     task::JoinHandle,
 };
 
-use crate::{fill_random_bytes, Meter::MeterMessageSender};
+use crate::Meter::MeterMessageSender;
 
-const ID_SIZE: usize = 256;
-
-struct JoinHandleWithId<T>([u8; ID_SIZE], JoinHandle<T>);
+static JOIN_HANDLE_ID: OnceLock<Mutex<u32>> = OnceLock::new();
+struct JoinHandleWithId<T>(u32, JoinHandle<T>);
 impl<T> JoinHandleWithId<T> {
     async fn new(handle: JoinHandle<T>) -> Result<JoinHandleWithId<T>, io::Error> {
-        let mut id = [0; ID_SIZE];
-        fill_random_bytes(&mut id).await?;
+        let id = {
+            // Get id value
+            let mut id_guard = JOIN_HANDLE_ID.get_or_init(|| Mutex::new(0)).lock().await;
+            let id = *id_guard;
+
+            // Update id to +1
+            if *id_guard >= u32::MAX {
+                *id_guard = 0;
+            } else {
+                *id_guard += 1;
+            }
+
+            // Return id
+            id
+        };
         Ok(JoinHandleWithId(id, handle))
     }
 }

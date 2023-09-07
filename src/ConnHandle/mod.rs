@@ -1,23 +1,64 @@
 use std::{
+    collections::HashSet,
     fmt::Display,
+    hash::Hash,
     net::{IpAddr, Ipv4Addr, SocketAddr},
 };
 
+use futures::io;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpListener, TcpStream,
     },
+    select,
+    sync::mpsc::Receiver,
+    task::JoinHandle,
 };
 
-use crate::Meter::MeterMessageSender;
+use crate::{fill_random_bytes, Meter::MeterMessageSender};
+
+const ID_SIZE: usize = 256;
+
+struct JoinHandleWithId<T>([u8; ID_SIZE], JoinHandle<T>);
+impl<T> JoinHandleWithId<T> {
+    async fn new(handle: JoinHandle<T>) -> Result<JoinHandleWithId<T>, io::Error> {
+        let mut id = [0; ID_SIZE];
+        fill_random_bytes(&mut id).await?;
+        Ok(JoinHandleWithId(id, handle))
+    }
+}
+impl<T> std::ops::Deref for JoinHandleWithId<T> {
+    type Target = JoinHandle<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.1
+    }
+}
+impl<T> std::ops::DerefMut for JoinHandleWithId<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.1
+    }
+}
+impl<T> PartialEq for JoinHandleWithId<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl<T> Eq for JoinHandleWithId<T> {}
+impl<T> Hash for JoinHandleWithId<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
 
 pub async fn accept_conn(
     src_port: u16,
     target: SocketAddr,
     buff_size: usize,
     meter_msg_sender: MeterMessageSender,
+    mut shutdown_msg_receiver: Receiver<()>,
 ) -> Result<(), std::io::Error> {
     let listener = TcpListener::bind(SocketAddr::new(
         IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
@@ -25,24 +66,49 @@ pub async fn accept_conn(
     ))
     .await?;
 
+    let mut conns = HashSet::new();
+
     loop {
-        // Listen on incoming connections
-        let (stream, peer) = match listener.accept().await {
-            Ok((s, p)) => (s, p),
-            Err(e) => {
-                eprintln!("{e}");
-                continue;
-            }
+        // Wait for an incoming connections or a shutdown command
+        let (stream, peer) = select! {
+            conn_future = listener.accept() => {
+                match conn_future {
+                    Ok((s, p)) => (s, p),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        continue;
+                    }
+                }
+            },
+            shutdown_future = shutdown_msg_receiver.recv() => {
+                shutdown_future.expect("Unexpected shutdown of channel");
+                break;
+            },
         };
 
         // Handle connection
         let meter_msg_sender = meter_msg_sender.clone();
-        tokio::spawn(async move {
+        let join_handle = tokio::spawn(async move {
             if let Err(e) = handle_conn(stream, peer, target, buff_size, meter_msg_sender).await {
                 eprintln!("{}", e);
             }
         });
+
+        // Insert handle to hashset
+        conns.insert(JoinHandleWithId::new(join_handle).await.unwrap());
+
+        // Remove closed connections from hashset
+        conns.retain(|c| !c.is_finished());
     }
+
+    // Wait for existing connections to disconnect
+    for c in conns {
+        if let Err(e) = c.1.await {
+            eprintln!("{}", e);
+        }
+    }
+
+    Ok(())
 }
 
 async fn handle_conn(

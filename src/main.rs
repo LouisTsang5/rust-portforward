@@ -23,11 +23,11 @@ fn main() {
     };
     print_config(&config);
 
-    // Create a meter
-    let (meter, meter_msg_sender) = Meter::Meter::new();
-
     // Main task loop
     let main_task_loop = async {
+        // Create a meter
+        let (meter, meter_msg_sender) = Meter::Meter::new();
+
         // Accept connection and dispatch tasks
         let mut join_handles: Vec<JoinHandle<()>> = Vec::with_capacity(config.forwards.len());
         let mut shutdown_channels: Vec<Sender<()>> = Vec::with_capacity(config.forwards.len());
@@ -86,7 +86,7 @@ fn main() {
 
         // Shutdown meter
         println!("Shutting down meter...");
-        meter.shutdown().unwrap();
+        meter.shutdown().await.unwrap();
     };
 
     // Configure async runtime

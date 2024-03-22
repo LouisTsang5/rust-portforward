@@ -140,11 +140,16 @@ async fn handle_conn(
     let s2t = {
         let meter_msg_sender = meter_msg_sender.clone();
         tokio::spawn(async move {
-            handle_forward(src_rstream, tgt_wstream, buff_size, move |n_bytes| {
-                meter_msg_sender
-                    .send(src_sockaddr, crate::Meter::Direction::From, n_bytes)
-                    .unwrap();
-            })
+            handle_forward(
+                src_rstream,
+                tgt_wstream,
+                buff_size,
+                MeterWrapper {
+                    meter_msg_sender,
+                    socket_addr: src_sockaddr,
+                    direction: crate::Meter::Direction::From,
+                },
+            )
             .await
         })
     };
@@ -152,11 +157,16 @@ async fn handle_conn(
     let t2s = {
         let meter_msg_sender = meter_msg_sender;
         tokio::spawn(async move {
-            handle_forward(tgt_rstream, src_wstream, buff_size, move |n_bytes| {
-                meter_msg_sender
-                    .send(src_sockaddr, crate::Meter::Direction::To, n_bytes)
-                    .unwrap()
-            })
+            handle_forward(
+                tgt_rstream,
+                src_wstream,
+                buff_size,
+                MeterWrapper {
+                    meter_msg_sender,
+                    socket_addr: src_sockaddr,
+                    direction: crate::Meter::Direction::To,
+                },
+            )
             .await
         })
     };
@@ -202,19 +212,28 @@ impl Display for HandleForwardError {
     }
 }
 
-async fn handle_forward<F: Fn(usize)>(
+struct MeterWrapper {
+    meter_msg_sender: MeterMessageSender,
+    socket_addr: SocketAddr,
+    direction: crate::Meter::Direction,
+}
+
+impl MeterWrapper {
+    async fn send(&self, n_bytes: usize) {
+        self.meter_msg_sender
+            .send(self.socket_addr, self.direction, n_bytes)
+            .await
+            .unwrap();
+    }
+}
+
+async fn handle_forward(
     mut src_rstream: OwnedReadHalf,
     mut tgt_wstream: OwnedWriteHalf,
     buff_size: usize,
-    meter_msg_send_fn: F,
+    meter: MeterWrapper,
 ) -> Result<(), HandleForwardError> {
-    let loop_res = forward_loop(
-        &mut src_rstream,
-        &mut tgt_wstream,
-        buff_size,
-        meter_msg_send_fn,
-    )
-    .await;
+    let loop_res = forward_loop(&mut src_rstream, &mut tgt_wstream, buff_size, meter).await;
 
     let shutdown_res = match tgt_wstream.shutdown().await {
         Ok(_) => Ok(()),
@@ -240,21 +259,21 @@ async fn handle_forward<F: Fn(usize)>(
     Err(error)
 }
 
-async fn forward_loop<F: Fn(usize)>(
+async fn forward_loop(
     src_rstream: &mut OwnedReadHalf,
     tgt_wstream: &mut OwnedWriteHalf,
     buff_size: usize,
-    meter_msg_send_fn: F,
+    meter: MeterWrapper,
 ) -> Result<(), std::io::Error> {
     let mut buff = vec![0; buff_size * 1024];
-    meter_msg_send_fn(0); // Send 0 to initialize the meter
+    meter.send(0).await; // Send 0 to initialize the meter
     loop {
         let bytes_read = src_rstream.read(&mut buff).await?;
         if bytes_read == 0 {
             break;
         };
         tgt_wstream.write(&buff[..bytes_read]).await?;
-        meter_msg_send_fn(bytes_read);
+        meter.send(bytes_read).await;
     }
     Ok(())
 }

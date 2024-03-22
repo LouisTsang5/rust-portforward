@@ -1,9 +1,18 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::mpsc::{self, Receiver, SendError, Sender, TryRecvError},
-    thread::{self, JoinHandle},
     time::{Duration, Instant},
+};
+
+use tokio::{
+    spawn,
+    sync::mpsc::{
+        channel,
+        error::{SendError, TryRecvError},
+        Receiver, Sender,
+    },
+    task::JoinHandle,
+    time::sleep,
 };
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
@@ -28,14 +37,14 @@ pub struct Meter {
 const SLEEP_MS: u64 = 500;
 
 fn spawn_meter_thread(
-    message_receiver: Receiver<Message>,
-    shutdown_receiver: Receiver<()>,
+    mut message_receiver: Receiver<Message>,
+    mut shutdown_receiver: Receiver<()>,
 ) -> JoinHandle<()> {
-    let t_handle = thread::spawn(move || {
+    let t_handle = spawn(async move {
         let mut last_run_instant = Instant::now();
         loop {
             // Sleep for a duration
-            thread::sleep(Duration::from_millis(SLEEP_MS));
+            sleep(Duration::from_millis(SLEEP_MS)).await;
 
             // Read the channel and summarize the total number of bytes
             let mut map: HashMap<SocketAddr, (usize, usize)> = HashMap::new();
@@ -113,27 +122,31 @@ pub enum ShutdownError {
 #[derive(Clone)]
 pub struct MeterMessageSender(Sender<Message>);
 impl MeterMessageSender {
-    pub fn send(
+    pub async fn send(
         &self,
         src_sockaddr: SocketAddr,
         direction: Direction,
         n_bytes: usize,
     ) -> Result<(), SendError<Message>> {
         let instant = Instant::now();
-        self.0.send(Message {
-            src_sockaddr,
-            direction,
-            instant,
-            n_bytes,
-        })
+        self.0
+            .send(Message {
+                src_sockaddr,
+                direction,
+                instant,
+                n_bytes,
+            })
+            .await
     }
 }
+
+const MPSC_CHN_BUFF_SIZE: usize = 1024 * 1024;
 
 impl Meter {
     pub fn new() -> (Self, MeterMessageSender) {
         // Create message and shutdown command channels
-        let (message_sender, message_receiver) = mpsc::channel::<Message>();
-        let (shutdown_sender, shutdown_receiver) = mpsc::channel::<()>();
+        let (message_sender, message_receiver) = channel::<Message>(MPSC_CHN_BUFF_SIZE);
+        let (shutdown_sender, shutdown_receiver) = channel::<()>(MPSC_CHN_BUFF_SIZE);
 
         // Spawn meter thread
         let t_handle = spawn_meter_thread(message_receiver, shutdown_receiver);
@@ -148,14 +161,14 @@ impl Meter {
         )
     }
 
-    pub fn shutdown(self) -> Result<(), ShutdownError> {
+    pub async fn shutdown(self) -> Result<(), ShutdownError> {
         // Send shutdown command
-        if let Err(e) = self.shutdown_sender.send(()) {
+        if let Err(e) = self.shutdown_sender.send(()).await {
             return Err(ShutdownError::SendCommandError(e));
         }
 
         // Wait for thread to join
-        if let Err(_) = self.t_handle.join() {
+        if let Err(_) = self.t_handle.await {
             return Err(ShutdownError::JoinError);
         }
         Ok(())
